@@ -1,0 +1,44 @@
+# festival-kafka-poc — load-generator scenario profiles.
+#
+# Pick a profile with `--scenario-file classpath:scenarios.yaml --profile <name>`,
+# or override individual knobs with CLI flags. CLI flags WIN over file values
+# (so a profile serves as the baseline that a Makefile target can tweak).
+#
+# Four scenario types:
+#   steady         — constant rps for durationSec
+#   ramp           — linear from fromRps to toRps over durationSec
+#   festival-spike — baselineRps for baselineDurationSec, then spikeMultiplier
+#                    x baselineRps for spikeDurationSec, then baselineRps for
+#                    cooldownDurationSec
+#   lightning-deal — steady rps, but hotShare fraction of items targets hotSkus
+
+profiles:
+
+  steady-100-60s:
+    scenario: steady
+    rps: 100
+    durationSec: 60
+
+  ramp-100-to-1000-5min:
+    scenario: ramp
+    fromRps: 100
+    toRps: 1000
+    durationSec: 300
+
+  festival-spike-100x10-120s:
+    scenario: festival-spike
+    baselineRps: 100
+    spikeMultiplier: 10
+    baselineDurationSec: 60
+    spikeDurationSec: 60
+    cooldownDurationSec: 30
+
+  lightning-deal-top3:
+    scenario: lightning-deal
+    rps: 200
+    durationSec: 120
+    hotSkus:
+      - SKU-00001
+      - SKU-00002
+      - SKU-00003
+    hotShare: 0.8

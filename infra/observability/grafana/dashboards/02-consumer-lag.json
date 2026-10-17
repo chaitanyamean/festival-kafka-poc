@@ -1,0 +1,56 @@
+{
+  "uid": "fkp-consumer-lag",
+  "title": "2 — Consumer lag per group per topic",
+  "tags": ["fkp", "phase-2", "kafka"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Lag (messages) — kafka-exporter",
+      "description": "LAG = log-end-offset − committed-offset per (consumergroup, topic). Phase-2 budget: lag should return to ~0 within the drain window; a monotonically growing line is a bottleneck.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 12 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max", "lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumergroup, topic) (kafka_consumergroup_lag{topic!~\"^(__|_).*\"})",
+          "legendFormat": "{{consumergroup}} ← {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "Current lag by consumer group (snapshot)",
+      "gridPos": { "x": 0, "y": 12, "w": 24, "h": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 100 },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        }
+      },
+      "options": { "displayMode": "lcd", "orientation": "horizontal" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumergroup) (kafka_consumergroup_lag{topic!~\"^(__|_).*\"})",
+          "legendFormat": "{{consumergroup}}"
+        }
+      ]
+    }
+  ]
+}

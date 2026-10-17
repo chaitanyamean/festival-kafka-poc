@@ -1,0 +1,75 @@
+{
+  "uid": "fkp-topic-throughput",
+  "title": "1 — Topic throughput (msgs/s in, out)",
+  "tags": ["fkp", "phase-2", "kafka"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "timepicker": {},
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Produce rate per topic (msgs/s, from kafka-exporter)",
+      "description": "Rate of change of the current end-offset per topic, summed across partitions. Internal topics (__*, _*) excluded.",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "mps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (rate(kafka_topic_partition_current_offset{topic!~\"^(__|_).*\"}[1m]))",
+          "legendFormat": "produce {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Consume rate per consumer group per topic (msgs/s)",
+      "description": "Rate of change of committed offsets per (consumergroup, topic). A dropping line while produce is non-zero means the consumer is falling behind.",
+      "gridPos": { "x": 0, "y": 10, "w": 24, "h": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "mps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (consumergroup, topic) (rate(kafka_consumergroup_current_offset{topic!~\"^(__|_).*\"}[1m]))",
+          "legendFormat": "{{consumergroup}} ← {{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total messages produced (last 1m)",
+      "gridPos": { "x": 0, "y": 20, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(kafka_topic_partition_current_offset{topic!~\"^(__|_).*\"}[1m]))"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Total messages consumed (last 1m)",
+      "gridPos": { "x": 12, "y": 20, "w": 12, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(kafka_consumergroup_current_offset{topic!~\"^(__|_).*\"}[1m]))"
+        }
+      ]
+    }
+  ]
+}

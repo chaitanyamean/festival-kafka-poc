@@ -1,0 +1,22 @@
+**/target/
+**/.git/
+**/.idea/
+**/.vscode/
+**/.DS_Store
+
+docs/
+*.md
+!README.md
+
+# Keep infra/postgres/init.sql + infra/topics.* available to the topic-init
+# mount only (compose binds specific files; this is for the service build
+# context which is '..' and includes infra/).
+infra/.env
+infra/.env.local
+infra/benchmarks/
+
+# Maven artifacts
+**/*.jar
+!/services/*/target/*.jar       # keep jars needed during multi-stage build
+
+**/*.log

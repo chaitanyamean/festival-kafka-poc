@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "OrderCancelled",
+  "namespace": "com.festivalkafka.events.order",
+  "doc": "Terminal failure event in the saga. Emitted after inventory.failed (direct) or after inventory release following payment.failed. Topic: order.cancelled.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "reason", "type": "string", "doc": "Short reason code (e.g. 'INVENTORY_FAILED', 'PAYMENT_FAILED')."}
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "OrderItem",
+  "namespace": "com.festivalkafka.events.common",
+  "doc": "Single line item in an order. See ADR-0002 for why monetary values are long minor units.",
+  "fields": [
+    {"name": "skuId", "type": "string", "doc": "Stock-keeping unit identifier."},
+    {"name": "quantity", "type": "int", "doc": "Units ordered. Must be > 0."},
+    {
+      "name": "unitPriceCents",
+      "type": "long",
+      "doc": "Unit price in minor units (paise for INR, cents for USD)."
+    }
+  ]
+}

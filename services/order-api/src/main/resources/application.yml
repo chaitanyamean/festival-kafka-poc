@@ -1,0 +1,75 @@
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+
+spring:
+  application:
+    name: order-api
+  main:
+    banner-mode: off
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:orderdb}
+    username: ${POSTGRES_USER:fkp}
+    password: ${POSTGRES_PASSWORD:fkp}
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 5000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    properties:
+      schema.registry.url: ${SCHEMA_REGISTRY_URL:http://localhost:8081}
+      specific.avro.reader: true
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: io.confluent.kafka.serializers.KafkaAvroSerializer
+      acks: "1"                 # Phase 2 upgrades to all + enable.idempotence=true
+    consumer:
+      group-id: ${CONSUMER_GROUP:order-api}
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+    listener:
+      ack-mode: record          # commit per record after listener returns
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Emit histogram buckets (not just summary percentiles) so Grafana can draw
+      # proper heatmaps and compute percentiles across the fleet in PromQL via
+      # histogram_quantile(). Only enable on the hottest timers to keep cardinality in check.
+      percentiles-histogram:
+        http.server.requests: true
+        spring.kafka.listener: true
+        spring.kafka.template: true
+      slo:
+        http.server.requests: 10ms,50ms,100ms,250ms,500ms,1s,2s,5s
+
+logging:
+  level:
+    root: INFO
+    com.festivalkafka: INFO
+    org.apache.kafka: WARN
+    org.springframework.kafka: INFO

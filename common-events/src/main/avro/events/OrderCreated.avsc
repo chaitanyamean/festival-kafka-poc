@@ -1,0 +1,39 @@
+{
+  "type": "record",
+  "name": "OrderCreated",
+  "namespace": "com.festivalkafka.events.order",
+  "doc": "Emitted by order-api after persisting the order. Topic: order.created.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "customerId", "type": "string", "doc": "UUID (string form)."},
+    {
+      "name": "items",
+      "type": {"type": "array", "items": "com.festivalkafka.events.common.OrderItem"},
+      "doc": "At least one item. Enforced at the API, not the schema."
+    },
+    {
+      "name": "totalAmountCents",
+      "type": "long",
+      "doc": "Must equal sum(items[i].unitPriceCents * items[i].quantity). Enforced in order-api."
+    },
+    {"name": "currency", "type": "string", "default": "INR"},
+    {
+      "name": "city",
+      "type": "string",
+      "default": "Mumbai",
+      "doc": "Shipping city. Added in schema v2; defaulted to preserve BACKWARD compat."
+    },
+    {
+      "name": "paymentMethod",
+      "type": {
+        "type": "enum",
+        "name": "PaymentMethod",
+        "namespace": "com.festivalkafka.events.common",
+        "symbols": ["CARD", "UPI", "NETBANKING", "COD", "WALLET"],
+        "default": "UPI"
+      },
+      "default": "UPI",
+      "doc": "Customer-selected payment method. Enum default lets consumers resolve unknown future symbols."
+    }
+  ]
+}

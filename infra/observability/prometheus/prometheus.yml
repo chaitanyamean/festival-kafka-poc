@@ -1,0 +1,92 @@
+# festival-kafka-poc — Prometheus scrape config.
+#
+# Targets:
+#   - 6 app services at :8080/actuator/prometheus   (Micrometer registry)
+#   - kafka-exporter at :9308/metrics               (Kafka broker-side)
+#   - otel-collector at :8888/metrics               (collector's own telemetry)
+#   - prometheus itself                             (self-monitoring)
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: festival-kafka-poc
+    environment: local
+
+scrape_configs:
+
+  - job_name: prometheus
+    static_configs:
+      - targets: [localhost:9090]
+
+  - job_name: kafka
+    scrape_interval: 10s
+    static_configs:
+      - targets: [kafka-exporter:9308]
+        labels:
+          component: broker
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: [otel-collector:8888]
+        labels:
+          component: otel-collector
+
+  # Services. One job per service rather than one job with multiple targets
+  # so a scrape failure on one service doesn't drop the whole fleet, and
+  # per-service alert routing is simpler later.
+
+  - job_name: order-api
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [order-api:8080]
+        labels:
+          service: order-api
+          component: application
+
+  - job_name: inventory-service
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [inventory-service:8080]
+        labels:
+          service: inventory-service
+          component: application
+
+  - job_name: payment-service
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [payment-service:8080]
+        labels:
+          service: payment-service
+          component: application
+
+  - job_name: shipping-service
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [shipping-service:8080]
+        labels:
+          service: shipping-service
+          component: application
+
+  - job_name: notification-service
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [notification-service:8080]
+        labels:
+          service: notification-service
+          component: application
+
+  - job_name: analytics-service
+    metrics_path: /actuator/prometheus
+    scrape_interval: 10s
+    static_configs:
+      - targets: [analytics-service:8080]
+        labels:
+          service: analytics-service
+          component: application

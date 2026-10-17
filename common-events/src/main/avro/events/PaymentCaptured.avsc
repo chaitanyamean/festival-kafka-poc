@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "PaymentCaptured",
+  "namespace": "com.festivalkafka.events.payment",
+  "doc": "Emitted by payment-service after a successful capture. Topic: payment.captured.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "paymentId", "type": "string", "doc": "UUID (string form)."},
+    {"name": "amountCapturedCents", "type": "long"},
+    {"name": "currency", "type": "string", "default": "INR"}
+  ]
+}

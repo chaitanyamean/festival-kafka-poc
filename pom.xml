@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>3.3.4</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.festivalkafka</groupId>
+    <artifactId>festival-kafka-poc</artifactId>
+    <version>0.1.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>festival-kafka-poc</name>
+    <description>Event-driven order platform scaling walkthrough: 100 orders/s → projected 1M events/s</description>
+
+    <!--
+      Modules are added as each service is created. Keeping this list in lockstep with the on-disk
+      modules keeps `mvn verify` from failing between service additions.
+    -->
+    <modules>
+        <module>common-events</module>
+        <module>services/order-api</module>
+        <module>services/inventory-service</module>
+        <module>services/payment-service</module>
+        <module>services/shipping-service</module>
+        <module>services/notification-service</module>
+        <module>services/analytics-service</module>
+        <module>services/load-generator</module>
+    </modules>
+
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+        <!-- Pinned versions. Changes recorded in docs/DECISIONS.md. -->
+        <avro.version>1.11.3</avro.version>
+        <confluent.version>7.6.1</confluent.version>
+        <testcontainers.version>1.21.3</testcontainers.version>
+        <springdoc.version>2.6.0</springdoc.version>
+        <!--
+          OpenTelemetry Java agent version. Downloaded at image-build time in
+          each service Dockerfile; the version is single-sourced here so a bump
+          happens in one place. Agent docs: https://opentelemetry.io/docs/zero-code/java/agent/
+        -->
+        <otel.agent.version>2.9.0</otel.agent.version>
+
+        <!--
+          Pin commons-codec below 1.17 because Testcontainers 1.21.3's bundled HTTP
+          client references org.apache.commons.codec.Charsets, which was removed in
+          commons-codec 1.17.0. Spring Boot 3.3.4 defaults this to 1.17.1 via its
+          dependency BOM; the override here forces a Charsets-bearing version.
+        -->
+        <commons-codec.version>1.16.1</commons-codec.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- Project-internal -->
+            <dependency>
+                <groupId>com.festivalkafka</groupId>
+                <artifactId>common-events</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!--
+              Override docker-java to 3.5.3. Testcontainers 1.21.3 ships 3.4.2 whose
+              default Docker API version is 1.43, which Docker 29.x (MinAPIVersion=1.44)
+              rejects with a stub response. 3.5.x negotiates a supported version.
+            -->
+            <dependency>
+                <groupId>com.github.docker-java</groupId>
+                <artifactId>docker-java-api</artifactId>
+                <version>3.5.3</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.docker-java</groupId>
+                <artifactId>docker-java-transport-zerodep</artifactId>
+                <version>3.5.3</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.docker-java</groupId>
+                <artifactId>docker-java-transport</artifactId>
+                <version>3.5.3</version>
+            </dependency>
+
+            <!-- Avro + Confluent Schema Registry client -->
+            <dependency>
+                <groupId>org.apache.avro</groupId>
+                <artifactId>avro</artifactId>
+                <version>${avro.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.confluent</groupId>
+                <artifactId>kafka-avro-serializer</artifactId>
+                <version>${confluent.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.confluent</groupId>
+                <artifactId>kafka-schema-registry-client</artifactId>
+                <version>${confluent.version}</version>
+            </dependency>
+
+            <!-- Testcontainers BOM -->
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- OpenAPI UI for order-api (introduced in Phase 1) -->
+            <dependency>
+                <groupId>org.springdoc</groupId>
+                <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+                <version>${springdoc.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <repositories>
+        <repository>
+            <id>confluent</id>
+            <name>Confluent Platform</name>
+            <url>https://packages.confluent.io/maven/</url>
+            <releases><enabled>true</enabled></releases>
+            <snapshots><enabled>false</enabled></snapshots>
+        </repository>
+    </repositories>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.avro</groupId>
+                    <artifactId>avro-maven-plugin</artifactId>
+                    <version>${avro.version}</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <!--
+                          Force the Docker Engine API version used by the docker-java client
+                          bundled with Testcontainers. Docker 29 MinAPIVersion is 1.44;
+                          docker-java 3.4.2 (TC 1.21.3) defaults to 1.43 and gets a stub
+                          response that it reports as BadRequest. 1.47 is accepted by
+                          Docker 24.0.6+ so it's safe on both Docker Desktop and the VPS.
+                        -->
+                        <environmentVariables>
+                            <DOCKER_API_VERSION>1.47</DOCKER_API_VERSION>
+                        </environmentVariables>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

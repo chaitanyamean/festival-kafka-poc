@@ -1,0 +1,35 @@
+# Phase 1 topic layout. Later phases bump partitions here and re-run `make topics`.
+# Fields:
+#   name                topic name
+#   partitions          partition count
+#   replication_factor  RF (Phase 1 = 1 broker, so RF=1)
+#   configs             per-topic overrides, map of key: value (optional)
+
+topics:
+  - name: order.created
+    partitions: 3
+    replication_factor: 1
+
+  - name: inventory.reserved
+    partitions: 3
+    replication_factor: 1
+
+  - name: inventory.failed
+    partitions: 3
+    replication_factor: 1
+
+  - name: payment.captured
+    partitions: 3
+    replication_factor: 1
+
+  - name: payment.failed
+    partitions: 3
+    replication_factor: 1
+
+  - name: shipment.created
+    partitions: 3
+    replication_factor: 1
+
+  - name: order.cancelled
+    partitions: 3
+    replication_factor: 1

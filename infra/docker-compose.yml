@@ -1,0 +1,627 @@
+# festival-kafka-poc docker-compose.
+#
+# Infra: Kafka (KRaft single-node), Confluent Schema Registry, Kafka UI
+# (Provectus), one Postgres with per-service DBs created by init.sql, and a
+# one-shot topic bootstrap (topics.sh driven by topics.yaml).
+# Services: order-api, inventory-service, payment-service, shipping-service,
+# notification-service, analytics-service, plus a profile-gated load-generator.
+#
+# Host-port bindings default to 127.0.0.1 so a public VPS does not expose
+# Kafka or Schema Registry or Kafka UI to the internet. Set FKP_BIND_HOST=0.0.0.0
+# to override.
+#
+# Memory limits are set per container so OOM kills identify the culprit on
+# the no-swap host.
+
+name: festival-kafka-poc
+
+services:
+
+  # ----------------------------------------------------------------------------
+  # Kafka (KRaft mode, combined broker+controller, single node).
+  # Phase 5 will scale this to 3 brokers.
+  # ----------------------------------------------------------------------------
+  kafka:
+    image: ${KAFKA_IMAGE:-confluentinc/cp-kafka:7.6.1}
+    hostname: kafka
+    container_name: fkp-kafka
+    restart: unless-stopped
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${KAFKA_EXTERNAL_PORT:-29092}:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:29092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 24
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_HEAP_OPTS: "-Xmx1G -Xms512M"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    networks: [fkp]
+
+  # ----------------------------------------------------------------------------
+  # Confluent Schema Registry. BACKWARD compat enforced for every subject.
+  # ----------------------------------------------------------------------------
+  schema-registry:
+    image: ${SR_IMAGE:-confluentinc/cp-schema-registry:7.6.1}
+    hostname: schema-registry
+    container_name: fkp-schema-registry
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${SR_PORT:-8081}:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:9092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC: _schemas
+      SCHEMA_REGISTRY_SCHEMA_COMPATIBILITY_LEVEL: backward
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xmx384M -Xms256M"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 24
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  # ----------------------------------------------------------------------------
+  # Kafka UI (Provectus). Browse topics, consumer groups, schemas, messages.
+  # ----------------------------------------------------------------------------
+  kafka-ui:
+    image: ${KAFKA_UI_IMAGE:-provectuslabs/kafka-ui:v0.7.2}
+    container_name: fkp-kafka-ui
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${KAFKA_UI_PORT:-8090}:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: fkp
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      AUTH_TYPE: DISABLED
+      SERVER_SERVLET_CONTEXT_PATH: /
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks: [fkp]
+
+  # ----------------------------------------------------------------------------
+  # Topic bootstrap. One-shot. Driven by infra/topics.yaml via infra/topics.sh.
+  # Idempotent (--create --if-not-exists). Re-runnable via `make topics`.
+  # ----------------------------------------------------------------------------
+  topic-init:
+    image: ${KAFKA_IMAGE:-confluentinc/cp-kafka:7.6.1}
+    container_name: fkp-topic-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      YAML_FILE: /infra/topics.yaml
+    volumes:
+      - ./topics.yaml:/infra/topics.yaml:ro
+      - ./topics.sh:/infra/topics.sh:ro
+    entrypoint: ["/bin/bash", "/infra/topics.sh"]
+    networks: [fkp]
+
+  # ----------------------------------------------------------------------------
+  # Postgres (single instance). init.sql creates one database per service on
+  # first boot. Each service connects to its own DB name via POSTGRES_DB env.
+  # Not exposed on the host network; use `docker exec` for debugging.
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: ${POSTGRES_IMAGE:-postgres:16-alpine}
+    hostname: postgres
+    container_name: fkp-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+      # POSTGRES_DB defaults to POSTGRES_USER if unset. The init script creates
+      # the six per-service DBs beyond that default.
+    command: >
+      postgres
+      -c shared_buffers=96MB
+      -c max_connections=100
+      -c work_mem=4MB
+      -c maintenance_work_mem=32MB
+      -c fsync=on
+      -c synchronous_commit=on
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+    networks: [fkp]
+
+  # ============================================================================
+  # Observability stack. Opt-in via `COMPOSE_PROFILES=observability` (or the
+  # make target `demo-phase2` which sets it). Topology:
+  #   services --OTLP/HTTP--> otel-collector --OTLP/gRPC--> jaeger
+  #   prometheus --scrape--> services /actuator/prometheus
+  #                        + kafka-exporter /metrics
+  #                        + otel-collector :8888/metrics  (collector-own telemetry)
+  #                        + prometheus itself
+  #   grafana --query--> prometheus + jaeger
+  # Memory total (opt-in): prometheus 400 + grafana 256 + exporter 64 +
+  # otel-collector 192 + jaeger 384 = ~1.3 GiB. Fits on dev workstations;
+  # on the 7.8 GiB VPS it brings the total close to the ceiling — see
+  # BENCHMARKS.md "Memory budget" section before enabling.
+  # ============================================================================
+
+  otel-collector:
+    profiles: ["observability"]
+    image: ${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.112.0}
+    container_name: fkp-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./observability/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      # Expose both OTLP ports on the host so a developer can send test spans
+      # from the host for debugging. Services talk over the fkp-net network.
+      - "${FKP_BIND_HOST:-127.0.0.1}:${OTEL_OTLP_HTTP_PORT:-4318}:4318"
+      - "${FKP_BIND_HOST:-127.0.0.1}:${OTEL_OTLP_GRPC_PORT:-4317}:4317"
+    healthcheck:
+      # The health_check extension listens on :13133 when enabled in the config.
+      test: ["CMD", "/otelcol-contrib", "components"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [fkp]
+
+  jaeger:
+    profiles: ["observability"]
+    image: ${JAEGER_IMAGE:-jaegertracing/all-in-one:1.60}
+    container_name: fkp-jaeger
+    restart: unless-stopped
+    environment:
+      # Enable OTLP ingestion. Without this flag Jaeger ignores incoming OTLP.
+      COLLECTOR_OTLP_ENABLED: "true"
+      # In-memory span store. Phase 2 is observability-first, not retention-first.
+      # SPAN_STORAGE_TYPE defaults to memory on all-in-one; set explicitly here
+      # so a future switch to Elasticsearch is a one-line change.
+      SPAN_STORAGE_TYPE: memory
+      # Cap in-memory trace count to protect the 384M limit under heavy load.
+      MEMORY_MAX_TRACES: "20000"
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${JAEGER_UI_PORT:-16686}:16686"
+      # Jaeger exposes its own :4317/:4318 OTLP receivers too. Keep them bound
+      # only inside fkp-net so there is one documented OTLP endpoint on the host
+      # (the collector's). No host port mapping here on purpose.
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:14269/"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    networks: [fkp]
+
+  prometheus:
+    profiles: ["observability"]
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v2.55.1}
+    container_name: fkp-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+      - --web.listen-address=:9090
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+    networks: [fkp]
+
+  grafana:
+    profiles: ["observability"]
+    image: ${GRAFANA_IMAGE:-grafana/grafana-oss:11.3.0}
+    container_name: fkp-grafana
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"      # dev-mode read-only for the demo
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_LOG_LEVEL: warn
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [fkp]
+
+  kafka-exporter:
+    profiles: ["observability"]
+    image: ${KAFKA_EXPORTER_IMAGE:-danielqsj/kafka-exporter:v1.8.0}
+    container_name: fkp-kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command:
+      - --kafka.server=kafka:9092
+      - --web.listen-address=:9308
+      - --log.level=warn
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${KAFKA_EXPORTER_PORT:-9308}:9308"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+    networks: [fkp]
+
+  # ============================================================================
+  # Services
+  # ============================================================================
+
+  order-api:
+    build:
+      context: ..
+      dockerfile: services/order-api/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/order-api:${IMAGE_TAG:-local}
+    container_name: fkp-order-api
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    ports:
+      - "${FKP_BIND_HOST:-127.0.0.1}:${ORDER_API_PORT:-8080}:8080"
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: order-api
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=order-api,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: orderdb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  inventory-service:
+    build:
+      context: ..
+      dockerfile: services/inventory-service/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/inventory-service:${IMAGE_TAG:-local}
+    container_name: fkp-inventory-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: inventory-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=inventory-service,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: inventorydb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  payment-service:
+    build:
+      context: ..
+      dockerfile: services/payment-service/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/payment-service:${IMAGE_TAG:-local}
+    container_name: fkp-payment-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: payment-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=payment-service,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: paymentdb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+      PAYMENT_FAILURE_RATE: ${PAYMENT_FAILURE_RATE:-0.05}
+      PAYMENT_DELAY_MS: ${PAYMENT_DELAY_MS:-50}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  shipping-service:
+    build:
+      context: ..
+      dockerfile: services/shipping-service/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/shipping-service:${IMAGE_TAG:-local}
+    container_name: fkp-shipping-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: shipping-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=shipping-service,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: shippingdb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  notification-service:
+    build:
+      context: ..
+      dockerfile: services/notification-service/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/notification-service:${IMAGE_TAG:-local}
+    container_name: fkp-notification-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: notification-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=notification-service,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: notificationdb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  analytics-service:
+    build:
+      context: ..
+      dockerfile: services/analytics-service/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/analytics-service:${IMAGE_TAG:-local}
+    container_name: fkp-analytics-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    environment:
+      SERVER_PORT: 8080
+      JAVA_OPTS: "-Xmx320m -Xms128m"
+      JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
+      OTEL_SERVICE_NAME: analytics-service
+      OTEL_RESOURCE_ATTRIBUTES: "service.name=analytics-service,service.namespace=festival-kafka-poc,deployment.environment=${FKP_ENV:-local}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/protobuf"
+      OTEL_TRACES_EXPORTER: "otlp"
+      OTEL_METRICS_EXPORTER: "none"   # metrics come from the Micrometer Prometheus scrape, not the agent
+      OTEL_LOGS_EXPORTER: "none"
+      OTEL_PROPAGATORS: "tracecontext,baggage"
+      OTEL_INSTRUMENTATION_KAFKA_EXPERIMENTAL_SPAN_ATTRIBUTES: "true"
+      KAFKA_BOOTSTRAP: kafka:9092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: analyticsdb
+      POSTGRES_USER: ${POSTGRES_USER:-fkp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fkp}
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    networks: [fkp]
+
+  # ----------------------------------------------------------------------------
+  # Load generator — profile-gated. Does NOT start on default `compose up`.
+  # Run with `docker compose --profile load run --rm load-generator <args>`
+  # or (preferred) `make demo-phase1`.
+  # ----------------------------------------------------------------------------
+  load-generator:
+    profiles: ["load"]
+    build:
+      context: ..
+      dockerfile: services/load-generator/Dockerfile
+    image: ${FKP_IMAGE_REGISTRY:-fkp}/load-generator:${IMAGE_TAG:-local}
+    container_name: fkp-load-generator
+    depends_on:
+      order-api:
+        condition: service_healthy
+    environment:
+      JAVA_OPTS: "-Xmx192m -Xms64m"
+    command: ["--host", "http://order-api:8080", "--rps", "100", "--duration-sec", "60", "--max-items", "3"]
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+    networks: [fkp]
+
+networks:
+  fkp:
+    name: fkp-net
+    driver: bridge
+
+volumes:
+  kafka-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:

@@ -1,0 +1,39 @@
+{
+  "type": "record",
+  "name": "EventEnvelope",
+  "namespace": "com.festivalkafka.events.common",
+  "doc": "Common envelope embedded in every lifecycle event. See ADR-0001 in docs/DECISIONS.md.",
+  "fields": [
+    {
+      "name": "eventId",
+      "type": "string",
+      "doc": "UUID (string form). Used by consumers for idempotent dedupe."
+    },
+    {
+      "name": "orderId",
+      "type": "string",
+      "doc": "UUID (string form). Partition key for all order lifecycle topics."
+    },
+    {
+      "name": "eventType",
+      "type": "string",
+      "doc": "Fully qualified event type, e.g. 'order.created'. Mirrored into the 'event-type' Kafka header."
+    },
+    {
+      "name": "occurredAt",
+      "type": {"type": "long", "logicalType": "timestamp-millis"},
+      "doc": "Event occurrence time at the producer (epoch millis UTC)."
+    },
+    {
+      "name": "schemaVersion",
+      "type": "int",
+      "doc": "Monotonically increasing per event type. Independent of Schema Registry subject version."
+    },
+    {
+      "name": "traceId",
+      "type": ["null", "string"],
+      "default": null,
+      "doc": "OpenTelemetry trace ID (W3C traceparent trace-id portion). Null until Phase 3 adds OTel propagation."
+    }
+  ]
+}

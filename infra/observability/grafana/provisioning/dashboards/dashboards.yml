@@ -1,0 +1,18 @@
+# Grafana dashboard provider.
+# Loads every JSON file under /var/lib/grafana/dashboards into the "festival-kafka-poc"
+# folder. Dashboards are code — edit the JSON in the repo, not the UI.
+
+apiVersion: 1
+
+providers:
+  - name: festival-kafka-poc
+    orgId: 1
+    folder: festival-kafka-poc
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

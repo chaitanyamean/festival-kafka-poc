@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "PaymentFailed",
+  "namespace": "com.festivalkafka.events.payment",
+  "doc": "Emitted by payment-service on capture failure. Triggers compensating release in inventory-service. Topic: payment.failed.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "reason", "type": "string", "doc": "Short reason code (e.g. 'INSUFFICIENT_FUNDS', 'CARD_DECLINED', 'GATEWAY_TIMEOUT')."}
+  ]
+}

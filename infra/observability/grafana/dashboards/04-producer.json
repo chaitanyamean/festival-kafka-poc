@@ -1,0 +1,109 @@
+{
+  "uid": "fkp-producer",
+  "title": "4 — Kafka producer (request latency, batch size, compression, retries)",
+  "tags": ["fkp", "phase-2", "kafka", "producer"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(kafka_producer_record_send_total, application)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Producer request latency avg (ms)",
+      "description": "Average time between send() and broker ack. Rising with throughput = producer-side back-pressure.",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ms" } },
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (application, client_id) (kafka_producer_request_latency_avg{application=~\"$service\"})",
+          "legendFormat": "{{application}} / {{client_id}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Batch size avg (bytes)",
+      "description": "Phase 1 default is 16 KiB (batch.size). A small average while produce is high means we're flushing before batches fill — linger.ms could be raised.",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "bytes" } },
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (application, client_id) (kafka_producer_batch_size_avg{application=~\"$service\"})",
+          "legendFormat": "{{application}} / {{client_id}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Compression rate avg (ratio)",
+      "description": "Compressed bytes / uncompressed bytes. Phase 1 uses no compression; expect 1.0.",
+      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "percentunit" } },
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg by (application, client_id) (kafka_producer_compression_rate_avg{application=~\"$service\"})",
+          "legendFormat": "{{application}} / {{client_id}}"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Producer retries rate (/s)",
+      "description": "Non-zero = broker refused or timed out at least one send. Expect ~0 on a healthy baseline.",
+      "gridPos": { "x": 12, "y": 9, "w": 12, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (application) (rate(kafka_producer_record_retry_total{application=~\"$service\"}[1m]))",
+          "legendFormat": "{{application}}"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Records sent rate per service per topic (/s)",
+      "gridPos": { "x": 0, "y": 18, "w": 24, "h": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (application, topic) (rate(kafka_producer_record_send_total{application=~\"$service\"}[1m]))",
+          "legendFormat": "{{application}} → {{topic}}"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "InventoryFailed",
+  "namespace": "com.festivalkafka.events.inventory",
+  "doc": "Emitted by inventory-service when one or more SKUs cannot be reserved. Topic: inventory.failed.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "reason", "type": "string", "doc": "Short, machine-friendly reason code (e.g. 'OUT_OF_STOCK', 'SKU_NOT_FOUND')."},
+    {
+      "name": "failedSkus",
+      "type": {"type": "array", "items": "string"},
+      "default": [],
+      "doc": "SKU ids that could not be reserved. May be empty if the reason is non-SKU-specific."
+    }
+  ]
+}

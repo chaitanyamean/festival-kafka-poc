@@ -1,0 +1,105 @@
+{
+  "uid": "fkp-broker",
+  "title": "5 — Kafka broker (ISR, partition health, topic shape)",
+  "tags": ["fkp", "phase-2", "kafka", "broker"],
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Under-replicated partitions",
+      "description": "sum(kafka_topic_partition_under_replicated_partition). Phase 1 runs RF=1 single-node, so this should always be 0. Non-zero in Phase 5+ (RF=3) means a replica is behind the leader.",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "refId": "A", "expr": "sum(kafka_topic_partition_under_replicated_partition)" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Partitions NOT at preferred leader",
+      "description": "sum(1 - kafka_topic_partition_leader_is_preferred). Non-zero means the active leader isn't the preferred replica — common after a broker bounce. Harmless on single-node.",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        { "refId": "A", "expr": "count(kafka_topic_partition_leader_is_preferred) - sum(kafka_topic_partition_leader_is_preferred)" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Total topics",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "refId": "A", "expr": "count(count by (topic) (kafka_topic_partitions{topic!~\"^(__|_).*\"}))" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Total partitions",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 6 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "targets": [
+        { "refId": "A", "expr": "sum(kafka_topic_partitions{topic!~\"^(__|_).*\"})" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Log-end-offset per topic (growth = throughput)",
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 10 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (topic) (kafka_topic_partition_current_offset{topic!~\"^(__|_).*\"})",
+          "legendFormat": "{{topic}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "text",
+      "title": "Phase-2 gap: request-handler idle %, disk I/O, network I/O",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 6 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Request-handler idle %**, **broker disk I/O**, and **broker network I/O** are NOT exposed by `kafka-exporter`. They require a Kafka JMX exporter (e.g. `prometheus/jmx_exporter` running as a Kafka sidecar) plus host-level `node_exporter` / cAdvisor for container disk and network. This is deferred to Phase 3 or Phase 5 along with the move to a 3-broker cluster — single-node KRaft (Phase 1-4) will not meaningfully exercise ISR or inter-broker throughput anyway. Documented explicitly in ADR-0008."
+      }
+    }
+  ]
+}

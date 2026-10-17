@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "InventoryReserved",
+  "namespace": "com.festivalkafka.events.inventory",
+  "doc": "Emitted by inventory-service after reserving stock for every item. Topic: inventory.reserved. Carries amountCents + currency forward so payment-service can capture without re-reading the original order.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "reservationId", "type": "string", "doc": "UUID (string form); handle used to release the reservation."},
+    {"name": "amountCents", "type": "long", "default": 0, "doc": "Order total in minor units, propagated from OrderCreated.totalAmountCents."},
+    {"name": "currency", "type": "string", "default": "INR"}
+  ]
+}

@@ -1,0 +1,162 @@
+package com.festivalkafka.shipping;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+
+import com.festivalkafka.common.Topics;
+import com.festivalkafka.events.common.EventEnvelope;
+import com.festivalkafka.events.payment.PaymentCaptured;
+import com.festivalkafka.events.shipping.ShipmentCreated;
+import com.festivalkafka.shipping.domain.Shipment;
+import com.festivalkafka.shipping.repo.ShipmentRepository;
+import io.confluent.kafka.serializers.KafkaAvroDeserializer;
+import io.confluent.kafka.serializers.KafkaAvroDeserializerConfig;
+import io.confluent.kafka.serializers.KafkaAvroSerializer;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.kafka.common.serialization.StringSerializer;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.testcontainers.containers.GenericContainer;
+import org.testcontainers.containers.KafkaContainer;
+import org.testcontainers.containers.Network;
+import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.containers.wait.strategy.Wait;
+import org.testcontainers.junit.jupiter.Container;
+import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.utility.DockerImageName;
+
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
+@Testcontainers
+class ShippingServiceIntegrationTest {
+
+    private static final Network NET = Network.newNetwork();
+
+    @Container
+    static final PostgreSQLContainer<?> POSTGRES =
+            new PostgreSQLContainer<>(DockerImageName.parse("postgres:16-alpine"))
+                    .withDatabaseName("shippingdb")
+                    .withUsername("fkp")
+                    .withPassword("fkp");
+
+    @Container
+    static final KafkaContainer KAFKA =
+            new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.6.1"))
+                    .withKraft()
+                    .withNetwork(NET)
+                    .withListener(() -> "kafka:19092")
+                    .withNetworkAliases("kafka");
+
+    @Container
+    static final GenericContainer<?> SCHEMA_REGISTRY =
+            new GenericContainer<>(DockerImageName.parse("confluentinc/cp-schema-registry:7.6.1"))
+                    .withNetwork(NET)
+                    .withNetworkAliases("schema-registry")
+                    .withEnv("SCHEMA_REGISTRY_HOST_NAME", "schema-registry")
+                    .withEnv("SCHEMA_REGISTRY_LISTENERS", "http://0.0.0.0:8081")
+                    .withEnv("SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS", "PLAINTEXT://kafka:19092")
+                    .withEnv("SCHEMA_REGISTRY_KAFKASTORE_TOPIC", "_schemas")
+                    .withExposedPorts(8081)
+                    .dependsOn(KAFKA)
+                    .waitingFor(Wait.forHttp("/subjects").forStatusCode(200));
+
+    @DynamicPropertySource
+    static void properties(DynamicPropertyRegistry r) {
+        r.add("spring.datasource.url",      POSTGRES::getJdbcUrl);
+        r.add("spring.datasource.username", POSTGRES::getUsername);
+        r.add("spring.datasource.password", POSTGRES::getPassword);
+        r.add("spring.kafka.bootstrap-servers", KAFKA::getBootstrapServers);
+        r.add("spring.kafka.properties.schema.registry.url", () -> schemaRegistryUrl());
+    }
+
+    private static String schemaRegistryUrl() {
+        return "http://" + SCHEMA_REGISTRY.getHost() + ":" + SCHEMA_REGISTRY.getMappedPort(8081);
+    }
+
+    @Autowired ShipmentRepository shipments;
+
+    @Test
+    void paymentCaptured_createsShipmentAndPublishes() {
+        UUID orderId = UUID.randomUUID();
+        PaymentCaptured event = PaymentCaptured.newBuilder()
+                .setEnvelope(EventEnvelope.newBuilder()
+                        .setEventId(UUID.randomUUID().toString())
+                        .setOrderId(orderId.toString())
+                        .setEventType("payment.captured")
+                        .setOccurredAt(Instant.now())
+                        .setSchemaVersion(1)
+                        .setTraceId(null)
+                        .build())
+                .setPaymentId(UUID.randomUUID().toString())
+                .setAmountCapturedCents(25_000L)
+                .setCurrency("INR")
+                .build();
+
+        produce(Topics.PAYMENT_CAPTURED, orderId.toString(), event);
+
+        await().atMost(Duration.ofSeconds(20)).untilAsserted(() -> {
+            Optional<Shipment> s = shipments.findByOrderId(orderId);
+            assertThat(s).isPresent();
+            assertThat(s.get().carrier()).isNotBlank();
+            assertThat(s.get().trackingNumber()).isNotBlank();
+        });
+
+        ConsumerRecord<String, Object> rec = pollSingle(Topics.SHIPMENT_CREATED);
+        ShipmentCreated out = (ShipmentCreated) rec.value();
+        assertThat(out.getEnvelope().getOrderId()).isEqualTo(orderId.toString());
+        assertThat(out.getCarrier()).isNotBlank();
+        assertThat(out.getTrackingNumber()).isNotBlank();
+    }
+
+    private void produce(String topic, String key, Object event) {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, KafkaAvroSerializer.class.getName());
+        props.put("schema.registry.url", schemaRegistryUrl());
+        try (KafkaProducer<String, Object> producer = new KafkaProducer<>(props)) {
+            producer.send(new ProducerRecord<>(topic, key, event));
+            producer.flush();
+        }
+    }
+
+    private ConsumerRecord<String, Object> pollSingle(String topic) {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, KAFKA.getBootstrapServers());
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "test-" + UUID.randomUUID());
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, KafkaAvroDeserializer.class.getName());
+        props.put(KafkaAvroDeserializerConfig.SCHEMA_REGISTRY_URL_CONFIG, schemaRegistryUrl());
+        props.put(KafkaAvroDeserializerConfig.SPECIFIC_AVRO_READER_CONFIG, "true");
+
+        AtomicReference<ConsumerRecord<String, Object>> capture = new AtomicReference<>();
+        try (KafkaConsumer<String, Object> consumer = new KafkaConsumer<>(props)) {
+            consumer.subscribe(List.of(topic));
+            await().atMost(Duration.ofSeconds(15)).until(() -> {
+                var records = consumer.poll(Duration.ofSeconds(1));
+                if (!records.isEmpty()) {
+                    capture.set(records.iterator().next());
+                    return true;
+                }
+                return false;
+            });
+        }
+        return capture.get();
+    }
+}

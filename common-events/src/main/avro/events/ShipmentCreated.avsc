@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "ShipmentCreated",
+  "namespace": "com.festivalkafka.events.shipping",
+  "doc": "Emitted by shipping-service after creating the shipment record. Terminal success event in the saga. Topic: shipment.created.",
+  "fields": [
+    {"name": "envelope", "type": "com.festivalkafka.events.common.EventEnvelope"},
+    {"name": "shipmentId", "type": "string", "doc": "UUID (string form)."},
+    {"name": "carrier", "type": "string", "doc": "Carrier code (e.g. 'BLUEDART', 'DELHIVERY')."},
+    {"name": "trackingNumber", "type": "string"}
+  ]
+}
