@@ -26,6 +26,23 @@ public class ShipmentRepository {
                 shipmentId, orderId, carrier, trackingNumber);
     }
 
+    /**
+     * Phase 3 batch insert. Delegates to the JDBC driver's batch pipeline (one
+     * network round-trip for N rows, assuming reWriteBatchedInserts is on in the
+     * JDBC URL — see docker-compose.yml). ORDER MATTERS ONLY as far as the
+     * underlying driver preserves per-call positions for exception reporting.
+     */
+    public void batchInsert(java.util.List<Row> rows) {
+        if (rows == null || rows.isEmpty()) return;
+        jdbc.batchUpdate(
+                "INSERT INTO shipments (shipment_id, order_id, carrier, tracking_number) VALUES (?, ?, ?, ?)",
+                rows.stream()
+                        .map(r -> new Object[]{r.shipmentId(), r.orderId(), r.carrier(), r.trackingNumber()})
+                        .toList());
+    }
+
+    public record Row(UUID shipmentId, UUID orderId, String carrier, String trackingNumber) {}
+
     public Optional<Shipment> findByOrderId(UUID orderId) {
         try {
             Shipment s = jdbc.queryForObject(

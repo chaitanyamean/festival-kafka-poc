@@ -339,3 +339,29 @@ demo-phase2: ## End-to-end Phase 2 demo: bring up observability stack, run ramp,
 	@echo " * Browse dashboards and Jaeger using the URLs above."
 	@echo " * To stop: 'make down-obs' (or 'make down-obs KEEP_VOLUMES=1' to retain state)."
 	@echo " * Report JSON: $(REPORT_DIR)/load-ramp.json"
+
+# =============================================================================
+# Phase 3 — client tuning sweeps
+# =============================================================================
+
+# Where the sweep CSV lands. Override to collect multiple runs.
+SWEEP_OUT       ?= docs/results/producer-sweep.csv
+SWEEP_RATE      ?= 500
+SWEEP_DURATION  ?= 60
+SWEEP_LINGER    ?= 0,5,20
+SWEEP_BATCH     ?= 16384,65536,131072
+SWEEP_COMP      ?= none,lz4,zstd
+
+.PHONY: sweep
+sweep: ## Phase 3: run the producer-config sweep against the running stack. Writes CSV to $(SWEEP_OUT).
+	bash scripts/sweep.sh \
+	  --out         "$(SWEEP_OUT)" \
+	  --rate        "$(SWEEP_RATE)" \
+	  --duration    "$(SWEEP_DURATION)" \
+	  --linger      "$(SWEEP_LINGER)" \
+	  --batch       "$(SWEEP_BATCH)" \
+	  --compression "$(SWEEP_COMP)"
+
+.PHONY: phase3-env
+phase3-env: ## Phase 3: print the recommended profile. Source it before `make up-obs`.
+	@cat profiles/phase3.env

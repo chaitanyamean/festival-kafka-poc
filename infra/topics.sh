@@ -55,6 +55,18 @@ for i in $(seq 0 $((count - 1))); do
         --partitions "$partitions" \
         --replication-factor "$rf" \
         "${cfg_args[@]}"
+
+    # Phase 3 upgrade path: if the topic already exists with fewer partitions,
+    # grow it to the configured count. Kafka only supports expand (not shrink),
+    # and expansion does NOT rebalance historical data — key→partition mapping
+    # changes only for NEW records. ADR-0009 covers the ordering story.
+    current=$(kafka-topics --bootstrap-server "$BS" --describe --topic "$name" 2>/dev/null \
+              | awk '/PartitionCount/ { for (i=1; i<=NF; i++) if ($i == "PartitionCount:") print $(i+1) }')
+    if [ -n "$current" ] && [ "$current" -lt "$partitions" ] 2>/dev/null; then
+        echo "altering $name: $current -> $partitions partitions"
+        kafka-topics --bootstrap-server "$BS" \
+            --alter --topic "$name" --partitions "$partitions"
+    fi
 done
 
 echo "---- topics after bootstrap ----"

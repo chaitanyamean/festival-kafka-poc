@@ -1,16 +1,40 @@
-# Phase 1 topic layout. Later phases bump partitions here and re-run `make topics`.
+# Topic layout. Partition count can grow between phases; infra/topics.sh is
+# idempotent for `--create --if-not-exists` AND handles `--alter --partitions`
+# when the count here is higher than the current cluster state.
+#
 # Fields:
 #   name                topic name
 #   partitions          partition count
-#   replication_factor  RF (Phase 1 = 1 broker, so RF=1)
+#   replication_factor  RF (Phase 1-4 = 1 broker, so RF=1)
 #   configs             per-topic overrides, map of key: value (optional)
+#
+# Phase 3 bump: hot topics on the happy path grow 3 → 12 so consumer
+# concurrency can scale beyond 3 parallel threads. Key = orderId still
+# preserves per-order ordering because within a single (now-larger) topic
+# the same key always hashes to the same partition for all producers.
+# Full migration semantics in ADR-0009.
 
 topics:
+  # ---------- Phase 3 hot path (12 partitions) ----------
   - name: order.created
-    partitions: 3
+    partitions: 12
     replication_factor: 1
 
   - name: inventory.reserved
+    partitions: 12
+    replication_factor: 1
+
+  - name: payment.captured
+    partitions: 12
+    replication_factor: 1
+
+  # ---------- Lower-volume compensation + fan-out (3 partitions) ----------
+  # Volumes here are capped by the hot path's failure rates
+  # (~1% inventory-fail, ~5% payment-fail → < 100 msg/s even at Phase 3 peaks).
+  # Growing partitions on these would move the fan-out consumers' lag ceiling
+  # but at the cost of 3x more consumer threads per group for no payoff — the
+  # messages aren't there.
+  - name: shipment.created
     partitions: 3
     replication_factor: 1
 
@@ -18,15 +42,7 @@ topics:
     partitions: 3
     replication_factor: 1
 
-  - name: payment.captured
-    partitions: 3
-    replication_factor: 1
-
   - name: payment.failed
-    partitions: 3
-    replication_factor: 1
-
-  - name: shipment.created
     partitions: 3
     replication_factor: 1
 

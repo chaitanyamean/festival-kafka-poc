@@ -5,13 +5,19 @@ import com.festivalkafka.events.common.EventEnvelope;
 import com.festivalkafka.events.order.OrderCreated;
 import com.festivalkafka.inventory.service.ReservationOutcome;
 import com.festivalkafka.inventory.service.ReservationService;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
 /**
- * Entry point from the saga's first topic. Routes outcomes to the publisher:
+ * Phase 3 batch listener. Dedupe + reservation INSERT + reservation_items INSERT
+ * each collapse to one DB round-trip per poll; stock decrement still runs
+ * per record because of SKU contention.
+ *
+ * <p>Outcome routing is unchanged from Phase 2:
  *   DUPLICATE  -> no-op
  *   RESERVED   -> publish inventory.reserved
  *   FAILED     -> publish inventory.failed + order.cancelled
@@ -28,23 +34,41 @@ public class OrderCreatedListener {
         this.publisher = publisher;
     }
 
-    @KafkaListener(topics = Topics.ORDER_CREATED, groupId = "${CONSUMER_GROUP:inventory-service}")
-    public void onOrderCreated(ConsumerRecord<String, OrderCreated> record) {
-        OrderCreated event = record.value();
-        EventEnvelope env = event.getEnvelope();
-        UUID eventId = UUID.fromString(env.getEventId());
-        UUID orderId = UUID.fromString(env.getOrderId());
+    @KafkaListener(
+            topics = Topics.ORDER_CREATED,
+            groupId = "${CONSUMER_GROUP:inventory-service}",
+            batch = "true",
+            containerFactory = "batchKafkaListenerContainerFactory")
+    public void onOrderCreatedBatch(List<ConsumerRecord<String, OrderCreated>> records) {
+        if (records.isEmpty()) return;
 
-        ReservationOutcome outcome = reservationService.tryReserve(
-                orderId, eventId, env.getEventType(), event.getItems());
+        List<ReservationService.ReservationInput> inputs = new ArrayList<>(records.size());
+        List<OrderCreated> values = new ArrayList<>(records.size());
+        for (ConsumerRecord<String, OrderCreated> r : records) {
+            OrderCreated value = r.value();
+            EventEnvelope env = value.getEnvelope();
+            inputs.add(new ReservationService.ReservationInput(
+                    UUID.fromString(env.getOrderId()),
+                    UUID.fromString(env.getEventId()),
+                    env.getEventType(),
+                    value.getItems()));
+            values.add(value);
+        }
 
-        switch (outcome.kind()) {
-            case DUPLICATE -> { /* nothing to publish */ }
-            case RESERVED  -> publisher.publishInventoryReserved(
-                    orderId, outcome.reservationId(), event.getTotalAmountCents(), event.getCurrency());
-            case FAILED    -> {
-                publisher.publishInventoryFailed(orderId, "OUT_OF_STOCK", outcome.failedSkus());
-                publisher.publishOrderCancelled(orderId, "INVENTORY_FAILED");
+        List<ReservationOutcome> outcomes = reservationService.tryReserveBatch(inputs);
+        for (int i = 0; i < outcomes.size(); i++) {
+            ReservationOutcome outcome = outcomes.get(i);
+            OrderCreated value = values.get(i);
+            UUID orderId = inputs.get(i).orderId();
+            switch (outcome.kind()) {
+                case DUPLICATE -> { /* nothing to publish */ }
+                case RESERVED  -> publisher.publishInventoryReserved(
+                        orderId, outcome.reservationId(),
+                        value.getTotalAmountCents(), value.getCurrency());
+                case FAILED    -> {
+                    publisher.publishInventoryFailed(orderId, "OUT_OF_STOCK", outcome.failedSkus());
+                    publisher.publishOrderCancelled(orderId, "INVENTORY_FAILED");
+                }
             }
         }
     }

@@ -40,6 +40,73 @@ public class ReservationService {
     }
 
     /**
+     * Phase 3 batch form. Dedupe + reservation INSERT + reservation_items INSERT each
+     * collapse to one round-trip for the whole poll result. Stock decrement stays
+     * per-record because SKU rows contend; batching those updates is a Phase 5+
+     * sharding / Redis-counter concern (ADR to be written when it matters).
+     *
+     * <p>Returns outcomes in the same order as {@code inputs}; duplicates
+     * (already processed) carry {@link ReservationOutcome.Kind#DUPLICATE}.
+     */
+    @Transactional
+    public List<ReservationOutcome> tryReserveBatch(List<ReservationInput> inputs) {
+        if (inputs.isEmpty()) return List.of();
+
+        // 1. Dedupe batch — one round-trip returning the subset to actually process.
+        List<ProcessedEventRepository.Entry> entries = inputs.stream()
+                .map(i -> new ProcessedEventRepository.Entry(i.eventId(), i.eventType()))
+                .toList();
+        java.util.Set<UUID> newEventIds = processed.batchRecordIfAbsent(entries);
+
+        List<ReservationOutcome> outcomes = new ArrayList<>(inputs.size());
+        List<ReservationRepository.ReservationRow> reservationRows = new ArrayList<>();
+        List<ReservationRepository.ItemRow> itemRows = new ArrayList<>();
+
+        for (ReservationInput input : inputs) {
+            if (!newEventIds.contains(input.eventId())) {
+                outcomes.add(ReservationOutcome.duplicate());
+                continue;
+            }
+
+            // Stock decrement still runs per record — SKU contention + partial-fail
+            // compensation make per-row semantics the right model here.
+            List<String> failedSkus = new ArrayList<>();
+            List<ReservationItem> applied = new ArrayList<>();
+            for (OrderItem item : input.items()) {
+                int rows = skus.decrementAvailable(item.getSkuId(), item.getQuantity());
+                if (rows == 1) applied.add(new ReservationItem(item.getSkuId(), item.getQuantity()));
+                else           failedSkus.add(item.getSkuId());
+            }
+            if (!failedSkus.isEmpty()) {
+                for (ReservationItem a : applied) skus.incrementAvailable(a.skuId(), a.quantity());
+                outcomes.add(ReservationOutcome.failed(failedSkus));
+                continue;
+            }
+
+            UUID reservationId = UUID.randomUUID();
+            reservationRows.add(new ReservationRepository.ReservationRow(
+                    reservationId, input.orderId(), ReservationStatus.RESERVED));
+            for (ReservationItem a : applied) {
+                itemRows.add(new ReservationRepository.ItemRow(reservationId, a.skuId(), a.quantity()));
+            }
+            outcomes.add(ReservationOutcome.reserved(reservationId));
+        }
+
+        reservations.batchInsertReservations(reservationRows);
+        reservations.batchInsertItemsFlat(itemRows);
+        log.debug("inventory batch: in={} dup={} reserved={} failed={}",
+                inputs.size(),
+                inputs.size() - newEventIds.size(),
+                reservationRows.size(),
+                outcomes.stream().filter(o -> o.kind() == ReservationOutcome.Kind.FAILED).count());
+        return outcomes;
+    }
+
+    /** Input tuple for the batch form. */
+    public record ReservationInput(
+            UUID orderId, UUID eventId, String eventType, List<OrderItem> items) {}
+
+    /**
      * Attempt to reserve stock for an order. Partial-failure handling: if any item
      * cannot be decremented, compensate by incrementing back the ones that were. This
      * keeps the operation at-least-once-safe without SELECT FOR UPDATE.

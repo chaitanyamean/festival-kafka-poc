@@ -29,15 +29,30 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: io.confluent.kafka.serializers.KafkaAvroSerializer
-      acks: "1"
+      # Phase 3: all producer knobs are env-tunable. Defaults keep Phase 2 behavior
+      # (acks=1, no idempotence, no batching linger, 16 KiB batch, no compression)
+      # so an unset profile reproduces the Phase 2 baseline exactly.
+      acks:              ${KAFKA_PRODUCER_ACKS:1}
+      batch-size:        ${KAFKA_PRODUCER_BATCH_SIZE:16384}
+      compression-type:  ${KAFKA_PRODUCER_COMPRESSION_TYPE:none}
+      properties:
+        enable.idempotence:                   ${KAFKA_PRODUCER_ENABLE_IDEMPOTENCE:false}
+        linger.ms:                            ${KAFKA_PRODUCER_LINGER_MS:0}
+        max.in.flight.requests.per.connection: ${KAFKA_PRODUCER_MAX_IN_FLIGHT:5}
     consumer:
       group-id: ${CONSUMER_GROUP:payment-service}
       auto-offset-reset: earliest
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+      # Phase 3: env-tunable fetch sizing. Defaults keep Phase 2 behavior
+      # (max-poll-records=500, fetch-min-bytes=1, fetch-max-wait=500ms).
+      max-poll-records:  ${KAFKA_CONSUMER_MAX_POLL_RECORDS:500}
+      fetch-min-size:    ${KAFKA_CONSUMER_FETCH_MIN_BYTES:1}
+      fetch-max-wait:    ${KAFKA_CONSUMER_FETCH_MAX_WAIT_MS:500}
     listener:
-      ack-mode: record
+      ack-mode: record          # commit per record after listener returns
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}
 
 # Simulated payment gateway. Phase 2 can swap this for a real client.
 payment:

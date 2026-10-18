@@ -32,8 +32,14 @@ spring:
       enable-auto-commit: false
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: io.confluent.kafka.serializers.KafkaAvroDeserializer
+      # Phase 3: env-tunable fetch sizing. Defaults keep Phase 2 behavior
+      # (max-poll-records=500, fetch-min-bytes=1, fetch-max-wait=500ms).
+      max-poll-records:  ${KAFKA_CONSUMER_MAX_POLL_RECORDS:500}
+      fetch-min-size:    ${KAFKA_CONSUMER_FETCH_MIN_BYTES:1}
+      fetch-max-wait:    ${KAFKA_CONSUMER_FETCH_MAX_WAIT_MS:500}
     listener:
-      ack-mode: record
+      ack-mode: record          # commit per record after listener returns
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}
 
 management:
   endpoints:

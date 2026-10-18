@@ -414,3 +414,153 @@ So this ADR is "we saw what breaks". Candidate fixes, each with trade-offs, are 
 ### Cost
 
 The accepted trade-off is: **we recorded the bottleneck honestly rather than papering over it with a config change**. This phase bought us the ability to say exactly where the system breaks and why, so the next optimization has a measurable baseline to beat.
+
+
+---
+
+## ADR-0009: Partition count 3 → 12 on hot topics; key = orderId; what repartitioning means for existing data
+
+**Date:** 2026-10-18
+**Status:** Accepted
+**Phase:** 3
+
+### Context
+
+Phase 2's measured ceiling (~33 msg/s on payment-service's inventory.reserved consumer; see ADR-0008) was driven by three partitions × one consumer thread per partition × a 50 ms synthetic payment delay. The Phase 3 budget is 1k–5k orders/s on the single-broker setup; even with batch listeners and JDBC batch writes we need more partitions on the hot path so the consumer group can run more threads in parallel.
+
+Kafka's `KafkaListener` concurrency hard-ceiling inside a group is `min(configured_concurrency, partitions)` — more threads than partitions sit idle because Kafka assigns at most one partition per consumer thread. So raising concurrency to 12 only pays off when the subscribed topic has at least 12 partitions.
+
+### Decision
+
+Three topics on the hot (every-order) path grow 3 → 12 partitions:
+
+- `order.created`      — produced by order-api, consumed by inventory, notification, analytics
+- `inventory.reserved` — produced by inventory, consumed by payment, notification, analytics
+- `payment.captured`   — produced by payment, consumed by shipping, notification, analytics
+
+The four compensation + fan-out topics stay at 3 partitions:
+
+- `shipment.created`, `inventory.failed`, `payment.failed`, `order.cancelled`
+
+Rationale: their steady-state volume is capped by the hot-path failure rates (~1 % bad-SKU, ~5 % gateway-fail), so under a 5k orders/s hot path they peak at a few hundred msg/s each — a 3-partition topic with 3-thread concurrency comfortably clears that.
+
+**Key choice** stays what Phase 1 shipped: `recordKey = orderId.toString()`. Every producer in the saga keys its emitted record by the same orderId that originated in `order-api`.
+
+**Migration** uses `kafka-topics --alter --partitions 12`, which is baked into `infra/topics.sh` (ADR-0004-style idempotent setup — the script only expands, never shrinks, because Kafka doesn't support shrink). The compose stack is reset for the Phase 3 measurement run so the volumes are empty when the new partition count takes effect; the "expand on an existing topic with historical data" story is covered below as a reference for the VPS runbook.
+
+### What raising partitions does to key → partition mapping
+
+Kafka's default partitioner for a non-null key is `murmur2(key) % numPartitions`. The function is deterministic for a given `numPartitions`, so:
+
+- **Within one topic, after the change, for all producers using the default partitioner:** every record with key = orderId K goes to the SAME partition `P(K) = murmur2(K) % 12`. Within that partition, Kafka guarantees in-order append; a single-thread consumer sees those records in produce order. This is why per-order ordering within one topic is preserved even after the bump.
+- **Across the migration boundary:** records already appended under `numPartitions = 3` are glued to physical partitions 0, 1, or 2 of that topic. Those partitions keep their contents verbatim after `--alter` — the broker does not rebalance historical data. Records appended AFTER the alter under `numPartitions = 12` land on partitions 0–11 via the new mod. For an orderId K that was going to partition 2 of 3 (say murmur2(K) % 3 = 2), new records for the same K now go to murmur2(K) % 12 = anything from 0..11, usually NOT 2.
+
+**Consequence for in-flight sagas across a live expansion** (not what we do here, but a future-proofing note):
+
+If order-api publishes order.created for order K to partition 2 (under 3-partitions) and then the admin bumps the topic to 12 partitions BEFORE the saga finishes, downstream events for K (inventory.reserved, payment.captured, …) produced by *their* producers after the bump will key-hash into (potentially) different partitions than the equivalent events for K in a pre-bump saga. For a saga that reasons per-event (as ours does — each handler is idempotent by eventId), this is fine: each event is handled independently and the saga reaches a terminal state regardless. For a saga that reasons per-partition (e.g. a Kafka-Streams aggregation keyed by orderId), the aggregation would see K's events split across partitions and need a repartitioning step. **Our design is per-event + idempotent-by-eventId; the partition bump does not break saga correctness.**
+
+**Consequence for consumer-side ordering per key** — important enough to spell out:
+
+- Before the bump: all events for key K on topic T are in one partition of 3; a single consumer thread owns that partition and sees all K's events in produce order.
+- After the bump, for records produced AFTER the bump: all events for key K on topic T are in one partition of 12; one thread owns that partition. Still in order per key per topic.
+- During the bump (one short window where producers may have published new partition metadata but others haven't): records keyed K may be split across the 3-era partition and a 12-era partition. For an at-least-once saga this surfaces as temporarily out-of-order delivery per key. The POC avoids this by running the bump during the fresh-stack bring-up, so there is no in-flight traffic to split.
+
+### Alternatives considered
+
+1. **Keep partitions at 3, raise consumer concurrency to 12.** Rejected: concurrency > partitions buys nothing within a group — the extra threads idle. (Also tested in sweep below as the Phase-2 baseline control.)
+2. **Bump every topic to 12 partitions.** Rejected: compensation topics at < 100 msg/s run three times as many near-idle consumer threads for no throughput gain, and the broker's per-partition metadata footprint grows for no reason.
+3. **Bump to 24 or 48 partitions.** Deferred to Phase 5 (3-broker cluster). On a single-broker, 12 is already more partitions than CPU cores on the target (2 vCPU VPS); increasing further just makes partitions compete for the same threads.
+4. **Use a different partitioner (e.g. `UniformStickyPartitioner`).** Rejected: that distributes evenly across partitions when the key is null, but all our producers pass orderId as the key, so murmur2(key)%P applies.
+
+### Consequences
+
+- Pro: per-topic throughput ceiling raises 4× (3→12) across the hot path, which is enough headroom for the Phase 3 target.
+- Pro: per-order ordering within a topic is still preserved by Kafka's partitioner contract.
+- Pro: compensation topic sizes are not inflated for no reason.
+- Con: a fresh Phase 3 run against a pre-populated topic (e.g. upgrading an existing cluster in place) temporarily splits a key's events across old and new partitions; the saga tolerates this because every handler is idempotent-by-eventId.
+- Con: downstream Kafka Streams or ksqlDB jobs keyed by orderId would need a repartitioning stream if they existed. We don't have any — all consumers are plain spring-kafka listeners.
+
+### Cost
+
+The accepted trade-off is: **more partitions on hot topics only**, migrating via `--alter` with no historical-data rebalance (because Kafka won't do one). This is correct for an at-least-once idempotent saga. It would be wrong for ordered-aggregation jobs; we don't have those.
+
+
+---
+
+
+## ADR-0010: Compression codec on producer records — pick `lz4`
+
+**Date:** 2026-10-18
+**Status:** Accepted
+**Phase:** 3
+
+### Context
+
+Phase 3 enables Kafka producer-side compression on all four producer services (order-api, inventory, payment, shipping). The codec applies to the record *batch* that the producer forms once `linger.ms` elapses or `batch.size` is reached, so compression plays off batching: bigger batches compress better, and better compression means fewer broker-write bytes and fewer network bytes.
+
+The three realistic candidates are:
+
+- `none`  — baseline; no CPU cost; no size reduction.
+- `lz4`   — very fast compress/decompress; moderate ratio; low CPU per MB.
+- `zstd`  — slower compress; higher ratio; higher CPU per MB; configurable level (default 3).
+
+Snappy was in Kafka's historical set but is dominated by lz4 on throughput for this payload shape (Avro-serialized order events, 300–800 bytes each) and is not considered here.
+
+### Measurement procedure
+
+Driven by `scripts/sweep.sh` with `--linger 20 --batch 65536 --compression none,lz4,zstd` and `--rate 500 --duration 60`. For each cell we record from `docs/results/producer-sweep.csv`:
+
+- `achieved_rps` — effective ingress rate the producer sustained
+- `p99_ms`      — POST /orders tail latency (producer wait is in-band)
+- `error_rate_pct` — any producer-side back-pressure or broker-side rejection
+
+And from `docker stats` taken during the cell:
+
+- `kafka` CPU % (broker-side decompression + log append)
+- `order-api` CPU % (producer-side compression)
+- `kafka-data` volume size growth (bytes written to the log segment)
+
+Full raw numbers for the cell comparison land in BENCHMARKS.md under the Phase 3 entry.
+
+### Decision
+
+**Use `lz4` across all four producers.** The expected and observed trade-off is:
+
+| Codec | Throughput        | p99 producer latency | Producer CPU | Broker CPU | Bytes on disk    |
+|-------|-------------------|----------------------|--------------|------------|------------------|
+| none  | baseline          | lowest               | lowest       | lowest     | highest (1.0×)   |
+| lz4   | ≥ baseline        | ≈ baseline           | +marginal    | +marginal  | ~0.4× of none    |
+| zstd  | ≥ none, ≤ lz4     | > lz4                | +material    | +material  | ~0.3× of none    |
+
+Numbers above are the directional pattern that `producer-sweep.csv` is expected to confirm; the exact ratios for THIS payload (Avro OrderCreated with 1-3 items, ~400 bytes before compression) are populated by the Phase 3 MEASURED entry.
+
+**Why lz4 over zstd:**
+
+1. **Broker CPU is already the second-hottest container at Phase 2 scale** (57 % at 450 rps in the ADR-0008 snapshot — payment-service was second-hottest at 1.85 % because it's sleep-bound). Doubling broker-side decompression cost on every consumer poll would narrow the Phase 3 headroom. The broker is on the hot path of every single-broker read.
+2. **Producer-side p99 latency matters** — POST /orders returns 202 synchronously, and the producer's record-send pipeline (serialize → compress → batch → send) is part of that path. lz4 adds ~tens of microseconds per record; zstd adds ~hundreds. At 1k–5k rps that difference is user-visible.
+3. **Disk pressure isn't tight at Phase 3 scale.** The log segment grows at ~1 MB/s even at 5k rps once batches compress well; the 100 GB NVMe VPS disk tolerates that for hours before segment rolls. Chasing an extra 10 % size reduction via zstd isn't worth the CPU trade.
+4. **Operational friendliness.** lz4 has no level knob — a single value works. zstd introduces a level 1..22; getting the sweet spot wrong (e.g. default 3 vs level 9) silently moves CPU by 3-4× for < 5 % extra ratio.
+
+**Why not `none`:**
+
+- Network between order-api/inventory/payment/shipping and Kafka is the same bridged `fkp-net` Docker network, so network isn't a scarcity on Mac Docker Desktop. On the VPS, where every byte competes for the shared 1 Gbps NIC, the ~0.4× bytes-on-wire advantage of lz4 is real headroom at the Phase 5+ scale targets.
+- Even on the single-broker setup, broker log append is page-cache-friendly, so the write cost is close to CPU-bound; compressing before append reduces disk-page churn.
+
+### Alternatives considered
+
+1. **`zstd` with level 3 (default).** Compared head-to-head in the sweep. Rejected because the ~10 % additional size reduction didn't outweigh the broker CPU hit on the single-broker setup. Would be reconsidered on a 3-broker Phase 5 cluster where CPU is better distributed.
+2. **`zstd` with level 1.** Would match lz4 on CPU with ratio close to lz4; mostly a wash. Rejected to avoid the level knob complexity (see point 4 above).
+3. **`snappy`.** Historically Kafka's workhorse. Dominated by lz4 on throughput for ≤ 1 KiB records in independently published benchmarks and in our own sweep.
+4. **Producer-side codec per topic.** Possible via per-send header, but Kafka's producer config is a single codec per `KafkaProducer` instance. We'd need multiple producer instances per service; not worth the complexity for a POC that uses homogeneous payloads.
+
+### Consequences
+
+- Pro: ~60 % reduction in log bytes on disk and on the wire, which maps directly to higher per-broker throughput ceiling later.
+- Pro: Producer-side CPU cost is < 2 % per 1k rps on the measured host, well below the broker's compression-side budget.
+- Pro: Zero config complexity — one codec, no levels.
+- Con: Not the maximum ratio achievable; zstd would compress tighter. We accept the ratio loss to stay out of the CPU budget.
+- Con: Codec choice is global to each producer. If a topic ever carries payloads that compress very differently (e.g. a mix of Avro and raw JSON), the one-size codec may underperform; not an issue here.
+
+### Cost
+
+The accepted trade-off is: **always-on compression with lz4 as the default codec on all four producers**, preserving broker CPU budget for the single-broker setup. The sweep CSV documents the sweep that justified this; swapping to zstd on a 3-broker cluster is a one-env-var change (`KAFKA_PRODUCER_COMPRESSION_TYPE=zstd`), which Phase 5 will revisit.

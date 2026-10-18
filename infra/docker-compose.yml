@@ -15,6 +15,33 @@
 
 name: festival-kafka-poc
 
+# =============================================================================
+# Phase 3 — Kafka client tuning via env vars (YAML anchors)
+# =============================================================================
+# Every tuning knob read by the Spring Boot services has a ${VAR:default}
+# fallback in application.yml so an unset shell env reproduces Phase 2 behavior
+# exactly. Setting the vars (e.g. via `set -a; source profiles/phase3.env`
+# before `make up-obs`) flips the stack to the Phase 3 config.
+#
+# Two anchors are provided and merged into each app service:
+#   x-fkp-producer-tuning  — producer-only knobs
+#   x-fkp-consumer-tuning  — consumer-only knobs + listener concurrency
+# Pure-consumer services (notification, analytics) only merge consumer-tuning.
+
+x-fkp-producer-tuning: &fkp-producer-tuning
+  KAFKA_PRODUCER_ACKS:              ${KAFKA_PRODUCER_ACKS:-1}
+  KAFKA_PRODUCER_ENABLE_IDEMPOTENCE: ${KAFKA_PRODUCER_ENABLE_IDEMPOTENCE:-false}
+  KAFKA_PRODUCER_LINGER_MS:         ${KAFKA_PRODUCER_LINGER_MS:-0}
+  KAFKA_PRODUCER_BATCH_SIZE:        ${KAFKA_PRODUCER_BATCH_SIZE:-16384}
+  KAFKA_PRODUCER_COMPRESSION_TYPE:  ${KAFKA_PRODUCER_COMPRESSION_TYPE:-none}
+  KAFKA_PRODUCER_MAX_IN_FLIGHT:     ${KAFKA_PRODUCER_MAX_IN_FLIGHT:-5}
+
+x-fkp-consumer-tuning: &fkp-consumer-tuning
+  KAFKA_CONSUMER_MAX_POLL_RECORDS:  ${KAFKA_CONSUMER_MAX_POLL_RECORDS:-500}
+  KAFKA_CONSUMER_FETCH_MIN_BYTES:   ${KAFKA_CONSUMER_FETCH_MIN_BYTES:-1}
+  KAFKA_CONSUMER_FETCH_MAX_WAIT_MS: ${KAFKA_CONSUMER_FETCH_MAX_WAIT_MS:-500}
+  KAFKA_LISTENER_CONCURRENCY:       ${KAFKA_LISTENER_CONCURRENCY:-1}
+
 services:
 
   # ----------------------------------------------------------------------------
@@ -354,6 +381,7 @@ services:
     ports:
       - "${FKP_BIND_HOST:-127.0.0.1}:${ORDER_API_PORT:-8080}:8080"
     environment:
+      <<: [*fkp-producer-tuning, *fkp-consumer-tuning]
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
@@ -396,6 +424,7 @@ services:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: [*fkp-producer-tuning, *fkp-consumer-tuning]
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
@@ -438,6 +467,7 @@ services:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: [*fkp-producer-tuning, *fkp-consumer-tuning]
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
@@ -482,6 +512,7 @@ services:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: [*fkp-producer-tuning, *fkp-consumer-tuning]
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
@@ -524,6 +555,7 @@ services:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: *fkp-consumer-tuning
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"
@@ -566,6 +598,7 @@ services:
       topic-init:
         condition: service_completed_successfully
     environment:
+      <<: *fkp-consumer-tuning
       SERVER_PORT: 8080
       JAVA_OPTS: "-Xmx320m -Xms128m"
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/opentelemetry-javaagent.jar"

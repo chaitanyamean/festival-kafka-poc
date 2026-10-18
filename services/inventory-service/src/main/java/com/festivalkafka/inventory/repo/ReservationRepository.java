@@ -26,6 +26,34 @@ public class ReservationRepository {
                 reservationId, orderId, status.name());
     }
 
+    /**
+     * Phase 3 batch form. One batched INSERT round-trip for N reservations.
+     * The order rows are inserted matches the caller's list ordering.
+     */
+    public void batchInsertReservations(List<ReservationRow> rows) {
+        if (rows == null || rows.isEmpty()) return;
+        List<Object[]> args = rows.stream()
+                .map(r -> new Object[]{r.reservationId(), r.orderId(), r.status().name()})
+                .toList();
+        jdbc.batchUpdate(
+                "INSERT INTO reservations (reservation_id, order_id, status) VALUES (?, ?, ?)",
+                args);
+    }
+
+    /** Flatten all items from several reservations into one batched INSERT. */
+    public void batchInsertItemsFlat(List<ItemRow> rows) {
+        if (rows == null || rows.isEmpty()) return;
+        List<Object[]> args = rows.stream()
+                .map(r -> new Object[]{r.reservationId(), r.skuId(), r.quantity()})
+                .toList();
+        jdbc.batchUpdate(
+                "INSERT INTO reservation_items (reservation_id, sku_id, quantity) VALUES (?, ?, ?)",
+                args);
+    }
+
+    public record ReservationRow(UUID reservationId, UUID orderId, ReservationStatus status) {}
+    public record ItemRow(UUID reservationId, String skuId, int quantity) {}
+
     public void insertItems(UUID reservationId, List<ReservationItem> items) {
         List<Object[]> rows = items.stream()
                 .map(i -> new Object[]{reservationId, i.skuId(), i.quantity()})

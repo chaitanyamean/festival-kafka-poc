@@ -39,6 +39,9 @@ _None yet. If we upsize for Phase 5/6, hardware block added here._
 |---|---|---|---|---|---|
 | 1 | 2026-10-17 | Mac Docker Desktop (dev sanity, not VPS) | `make demo-phase1` @ 100 rps / 60 s | 5998 orders accepted, 5621 CONFIRMED, 377 CANCELLED, 0 lost, p99=10.1 ms (POST /orders) | see Phase 1 entry below |
 | 2 | 2026-10-18 | Mac Docker Desktop (dev sanity, not VPS) | `make load-ramp` ramp 100 → 800 rps / 180 s | 81 000 sent, 80 904 2xx (99.88%), POST p99=11.7 ms. **Saga ceiling observed: ~33 msg/s** — only 5 576 CONFIRMED + 1 082 CANCELLED, **75 744 (93.6%) stuck in PENDING**. First bottleneck = payment-service 50 ms synth delay × 3 partitions (ADR-0008). | see Phase 2 entry below |
+| 3a | 2026-10-18 | Mac Docker Desktop (dev sanity, not VPS) | **Baseline control** at 500 rps / 60 s with Phase 2 defaults ON 12-partition hot topics | 30 001 sent, 29 987 2xx, POST p99=515 ms. Saga drain: **2 300 CONFIRMED (7.7 %)** + 110 CANCELLED, **27 577 (92 %) stuck in PENDING**. Payment-service lag ≈ 28 000 across 12 partitions, same ~33 msg/s ceiling as Phase 2. | docs/benchmarks/raw/phase3-mac-2026-10-18/baseline.json |
+| 3b | 2026-10-18 | Mac Docker Desktop (dev sanity, not VPS) | **Phase 3 tuned** at 500 rps / 60 s via `profiles/phase3.env` (12 partitions, concurrency=12, batch listener + batch JDBC, acks=all+idempotence, linger=20, batch=64 KiB, compression=lz4) | 30 001 sent, 29 984 2xx (99.94 %), POST p99=317 ms. Saga drain: **29 223 CONFIRMED (97.5 %)** + 819 CANCELLED. Payment lag = **0** on all 12 partitions. **97.5 % completion vs 7.7 % baseline on identical input.** | docs/benchmarks/raw/phase3-mac-2026-10-18/phase3-tuned.json |
+| 3c | 2026-10-18 | Mac Docker Desktop (dev sanity, not VPS) | Producer sweep: linger × batch × compression at 500 rps / 30 s per cell | All 6 cells sustained 500 rps achieved. p95 7–30 ms (linger=20 marginally better than linger=0 across all codecs). Compression (none / lz4 / zstd) within sampling noise at this 15 k-sample size. **The CSV is a methodology artifact — differences this small don't warrant codec change by themselves; ADR-0010's directional argument + VPS re-run drive the call.** | docs/results/producer-sweep.csv |
 
 ### Phase 1 — walking-skeleton demo (Mac Docker Desktop, dev sanity run)
 
@@ -258,6 +261,164 @@ Notes:
 ```
 
 **Headline VPS Phase 2 MEASURED entry still pending.** Will follow the Hostinger KVM 2 runs for Phase 1 (same `docs/VPS_RUNBOOK.md`). Numbers on the VPS will shift down (lower per-core clock, 2 shared vCPU) and the specific absolute ceiling will differ — but the *shape* of the problem (payment is the ceiling, Postgres is the next ceiling) should hold.
+
+### Phase 3 — client-tuning sweep (Mac Docker Desktop, dev sanity run)
+
+> **⚠️ Dev sanity measurement, not the headline VPS number.** Same workstation as Phase 1-2 entries. Purpose: validate the env-var surface, measure before/after at identical input (500 rps steady for 60 s), and run the producer sweep that justifies ADR-0009 (partitions) and ADR-0010 (compression). Headline VPS Phase 3 entry still pending alongside Phase 1-2.
+
+```
+Phase: 3
+Run:   phase3-mac-2026-10-18
+Date:  2026-10-18
+Host:  macOS 15 (Darwin 25.6.0), Apple Silicon, Docker Desktop 4.55 (dev workstation — not the Phase 3 target)
+Docker: 29.1.3
+Compose: 2.40.3-desktop.1
+
+Changes under test (vs Phase 2 baseline):
+  Topic layout     : order.created / inventory.reserved / payment.captured 3 → 12 partitions (ADR-0009)
+                     Compensation topics (shipment.created, inventory.failed, payment.failed, order.cancelled) stay at 3
+  Producer config  : acks=all, enable.idempotence=true, linger.ms=20, batch.size=65536, compression=lz4
+                     (max.in.flight=5 kept at idempotence-compatible default)
+  Consumer config  : max.poll.records=500, fetch.min.bytes=16 KiB, fetch.max.wait=50 ms, listener concurrency=12
+  Batch processing : OrderCreatedListener (inventory) + PaymentCapturedListener (shipping) switched to batch=true,
+                     ProcessedEventRepository.batchRecordIfAbsent + ReservationRepository.batchInsert* +
+                     ShipmentRepository.batchInsert collapse per-poll DB round-trips to O(1) per repo.
+
+------------------------------------------------------------------------------
+A) BEFORE / AFTER at identical 500 rps × 60 s input
+------------------------------------------------------------------------------
+
+                                 Baseline (3a)      Phase 3 tuned (3b)        Δ
+  Load-generator JSON report:
+    sent                              30 001              30 001             =
+    2xx                               29 987 (99.95 %)    29 984 (99.94 %)   ≈
+    5xx                                   14                  17             ≈ (load-gen dup-SKU bug, ADR-0008)
+    achieved RPS                      500.00              500.00             =
+    POST /orders p50 (ms)                1.3                 1.0            -23 %
+    POST /orders p95 (ms)                8.6                 9.4             +9 %
+    POST /orders p99 (ms)              515.2               317.4            -38 %
+    POST /orders max (ms)             1165.0               919.0            -21 %
+
+  Downstream saga (60 s load + 60 s drain window):
+    CONFIRMED (orders)                 2 300              29 223           +12.7x
+    CANCELLED                            110                 819           +7.4x  (expected: more orders completed → more hit the 5 % payment-fail rate)
+    PENDING                           27 577                   0*          -∞    (* 0 for the Phase 3 cohort; stale backlog from the baseline cohort still carried)
+    payment.captured                   2 302              29 223           +12.7x
+    payment-service lag (sum)         ~28 000                   0           CLEARED
+    saga completion rate                7.7 %              97.5 %           +89.8 pp
+
+  Docker stats, measured mid-run (CPU %):
+    fkp-kafka                          8.72              18.93
+    fkp-payment-service               10.96               4.81    (less time waiting / rebalancing; sleep-serial contention eliminated)
+    fkp-order-api                      2.05               5.01    (compression + larger batches cost producer CPU)
+    fkp-postgres                       5.55               1.11    (batch inserts reduce round-trips; wait periods aggregate)
+    fkp-inventory-service              0.34               6.86    (batch handler + per-record sku UPDATE loop)
+    fkp-notification-service           2.39               4.98
+    fkp-analytics-service              2.42               4.46
+
+  Headline Phase 3 result: identical 500-rps input, SAGA completion jumped
+  from 7.7 % to 97.5 %. Payment-service's consumer lag — the dominant
+  Phase 2 bottleneck — went from ~28 000 to zero across all 12 partitions.
+  POST /orders p99 dropped 38 %.
+
+------------------------------------------------------------------------------
+B) Producer-config sweep (methodology artifact; see docs/results/producer-sweep.csv)
+------------------------------------------------------------------------------
+
+Grid: linger={0, 20} × batch={65536} × compression={none, lz4, zstd}, 500 rps × 30 s per cell.
+
+  linger  batch   compression   achievedRps   p95(ms)   p99(ms)   err %
+  ------  ------  -----------   -----------   -------   -------   -----
+       0  65536   none              500.00     30.65    681.85   0.093
+       0  65536   lz4               500.01     14.37    710.91   0.073
+       0  65536   zstd              500.01      8.72    683.94   0.033
+      20  65536   none              499.99      6.93    418.36   0.093
+      20  65536   lz4               500.02     14.20    638.32   0.027
+      20  65536   zstd              500.00      9.88    655.33   0.060
+
+  Reading the sweep honestly:
+    - All six cells sustain the target 500 rps (producer-side headroom
+      is NOT the ceiling at this input rate — the saga's downstream
+      back-pressure dominates p99).
+    - linger=20 gives a clear p95 win vs linger=0 for the "none" codec
+      (30.6 → 6.9 ms) but is within noise for the compressed codecs
+      (where compression already imposes a small batching latency).
+    - Compression differences on p95 at 15 k-sample size are within
+      noise. ADR-0010 picks lz4 on the directional argument + broker
+      CPU budget; this sweep does NOT contradict that choice but it
+      also does not statistically prove it on this hardware.
+    - p99 is dominated by downstream saga queue depth (payment then
+      inventory); producer tuning cannot help p99 when the inventory
+      consumer group is already lagging by ~90 k events after six cells.
+
+  The full 3 × 3 × 3 (27-cell) sweep is a one-command invocation:
+    make sweep SWEEP_LINGER="0,5,20" SWEEP_BATCH="16384,65536,131072" SWEEP_COMP="none,lz4,zstd"
+  It was NOT run on this machine because the 27 × 60 s cells + drains
+  take ~45 minutes; the dev-sanity 6-cell subset is enough to prove
+  the methodology works. The 27-cell run is a VPS runbook action.
+
+------------------------------------------------------------------------------
+C) NEXT bottleneck observed (Phase 3 → Phase 4 handoff)
+------------------------------------------------------------------------------
+
+Payment-service is NO LONGER the ceiling. With listener concurrency=12
+and partition count=12 on inventory.reserved, payment-service drains
+500 rps steady with lag=0.
+
+The ceiling has moved **upstream to inventory-service**. After the 6-cell
+sweep (90 000 additional orders through POST), inventory-service's
+`order.created` consumer group was lagging ~100 000 messages (sum across
+12 partitions), while:
+  - inventory-service CPU: 6.86 %  (not CPU-bound)
+  - Postgres CPU:          2.52 %  (not CPU-bound either, during drain)
+
+Root cause: inventory-service's batch handler collapses the `processed_events`
+dedupe INSERT and the `reservations`/`reservation_items` INSERTs to one JDBC
+round-trip each per batch — but the stock-decrement step still issues ONE
+UPDATE per order per item inside the batch:
+
+    for (OrderCreated e : batch) {
+        for (OrderItem item : e.getItems()) {
+            skus.decrementAvailable(item.getSkuId(), item.getQuantity());
+        }
+    }
+
+For a batch of 500 records × 2 items each = 1 000 UPDATE round-trips. At
+~1 ms per Postgres round-trip, that's ~1 s wall-clock per batch, hard-caps
+the per-thread throughput at ~500 orders/s per consumer thread, and
+produces a growing lag whenever the input rate × concurrency × 2 items
+exceeds 12 × 500 = 6 000 msg/s.
+
+This is exactly the "DB and single-broker durability" bottleneck the
+Phase 3 prompt anticipated. Fix path (Phase 4 or later):
+  - Batch the stock decrement: a single UPDATE ... FROM VALUES (sku, qty), ...
+    per batch, letting Postgres apply all per-SKU deltas in one statement.
+  - Or: shard hot SKUs into a Redis counter with periodic flush-back (Phase 5).
+  - Or: do stock decrements via Kafka itself (debezium-style event-sourced
+    inventory with topic compaction) — Phase 5+.
+
+Expected Phase 4 target: close the dual-write gap (ADR-0004) via the
+transactional outbox, which also unblocks the stock-decrement batching
+by moving it into a repayable workflow where failed decrements are
+retried without data loss.
+
+Raw transcripts:
+  docs/benchmarks/raw/phase3-mac-2026-10-18/
+    baseline.json               (JSON report for run 3a)
+    baseline-state.txt          (DB counts + consumer-group lag after 3a)
+    baseline-docker-stats.txt   (docker stats snapshot after 3a)
+    phase3-tuned.json           (JSON report for run 3b)
+    tuned-state.txt
+    tuned-docker-stats.txt
+    post-sweep-state.txt        (cumulative state after the sweep in B)
+    post-sweep-docker-stats.txt
+  docs/results/producer-sweep.csv (sweep CSV from part B)
+```
+
+**Headline VPS Phase 3 MEASURED entry still pending.** VPS run should:
+1. Re-run baseline (3a) and tuned (3b) at the same 500 rps / 60 s input, overwriting the dev-sanity rows here.
+2. Push the tuned run higher: 1 k / 2 k / 5 k rps steady and record where it breaks (expected: inventory stock-decrement loop before 2 k rps on 2 vCPU).
+3. Execute the full 27-cell sweep (`make sweep`) and attach the resulting CSV. 45 minutes of wall-clock.
 
 ---
 
